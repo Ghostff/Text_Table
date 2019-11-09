@@ -1,6 +1,5 @@
 <?php
 
-
 class TextTable
 {
     public const ALIGN_CENTER = STR_PAD_BOTH;
@@ -13,6 +12,9 @@ class TextTable
     private $column_size = 0;
     private $caption = null;
     private $lines = [];
+    private $last_row = 1;
+    private $last_col = 1;
+
 
     public function __construct($column_size = 0)
     {
@@ -49,95 +51,113 @@ class TextTable
         return $this;
     }
 
-
     /**
      * @param \TextTable|string $value
      * @param string|null       $position
+     * @param int|null          $width
      * @param int               $align
      * @param int               $padding
      * @return \TextTable
      */
-    public function put($value, string $position = null, int $align = self::ALIGN_LEFT, int $padding = 1): TextTable
+    public function put($value, array $position = null, int $width = null, bool $wrap = true, int $align = self::ALIGN_LEFT, int $padding = 0): TextTable
     {
-        $this->count++;
-        $length = strlen($value);
-        $column = 1;
-        $row    = 1;
-
         if ($position) {
-            [$row, $column] = array_map(function (string $value): int {
-                return (int) trim($value);
-            }, explode(',', $position));
+            [$this->last_row, $this->last_col] = $position;
         } else {
-            if ($this->column_size > 0) {
-                $column = ($this->count % $this->column_size == 0) ? $this->column_size : 1;
-                $row    = ($this->count > $this->column_size) ? round($this->count / $this->column_size) : 1;
+            if ($this->count % $this->column_size == 0) {
+                $this->last_row++;
+                $this->last_col = 1;
+            } else {
+                $this->last_col++;
             }
         }
 
         if ($value instanceof TextTable) {
             $length = strlen($value->lines[0]);
+        } else {
+            if ($width) {
+                if ($wrap) {
+                    array_map(function (string $chunk) use ($width) {
+                        $this->put($chunk, [$this->last_row + 1, $this->last_col], $width, false);
+                    }, str_split($value, $width));
+                    return $this;
+                }
+
+                $value  = substr($value, 0, $width);
+                $length = $width;
+            } else {
+                $length = strlen($value);
+            }
         }
 
-        $this->stack[] = [
-            'v' => $value,
-            'r' => $row,
-            'c' => $column,
-            'a' => $align,
-            'p' => $padding,
-            'l' => $length,
-        ];
-
-        $this->maxes[$column] = isset($this->maxes[$column]) ? max($this->maxes[$column], $length) : 0;
+        $indexes                        = $this->last_col;
+        $this->stack[$this->last_row][] = $this->createColumn($value, $align, $padding, $indexes);
+        $this->maxes[$indexes]          = isset($this->maxes[$indexes]) ? max($this->maxes[$indexes], $length) : $length;
+        $this->count++;
 
         return $this;
     }
 
     public function __toString(): string
     {
-        $current_row = 0;
-        $lines       = [];
-        $input       = '';
         $space       = ' ';
         $new_line    = "\n";
+        $content     = null;
         $border      = null;
+        $table_width = 0;
 
-        foreach ($this->stack as $data)
+        foreach ($this->stack as $columns)
         {
-            $value      = $data['v'];
-            $padding    = str_repeat($space, $data['p']);
-            $pad_length = $this->maxes[$data['c']] + 3;
-
-            if ($value instanceof TextTable) {
-                $new_value = rtrim($value->__toString(), $new_line);
-            } else {
-                $new_value = $value;
+            # Equalize columns. Fill up incomplete array eg if max column is 6 and 4 columns is specified,
+            #  then populate the last 2 with an empty data.
+            $remainder = count($columns) % $this->column_size;
+            if ($remainder != 0) {
+                $remainder = $this->column_size - $remainder;
+                for ($i = 1; $i <= $remainder; $i++) {
+                    $columns[] = $this->createColumn('', self::ALIGN_LEFT, 0, $this->last_col + $i);
+                }
             }
 
-            $input .= "|{$padding}" . str_pad($new_value, $pad_length, $space, $data['a']) . $padding;
+            $line = '';
+            foreach ($columns as $column)
+            {
+                $value      = $column['v'];
+                $padding    = str_repeat($space, $column['p']);
+                $pad_length = $this->maxes[$column['c']];
 
-            if ($data['c'] == $this->column_size) {
-                $input .= '|';
-            }
-
-            if (($current_row + 1) != $data['r']) {
-                $border  = $border ?? '+' . str_repeat('-', strlen($input) - 2) . '+';
-
-                if (empty($lines)) {
-                    $lines[] = $border;
+                if ($value instanceof TextTable) {
+                    $new_value = rtrim($value->__toString(), $new_line);
+                } else {
+                    $new_value = $value;
                 }
 
-                $lines[] = $input;
-                $lines[] = $border;
-                $input   = '';
+                $line .= "|{$padding}" . str_pad($new_value, $pad_length, $space, $column['a']);
             }
 
-            $current_row = $data['r'];
+            # ?? to generate border once.
+            $border  = $border ?? '+' . str_repeat('-', ($table_width = strlen($line) - 1)) . '+';
+            $content .= $content ? "\n{$line}|\n{$border}" : "{$border}\n{$line}|\n{$border}";
         }
 
-        $this->lines = $lines;
-        $caption     = $this->caption ? str_pad($this->caption, strlen($lines[0]), $space, STR_PAD_BOTH) . $new_line : '';
+        $caption = $this->caption ? str_pad($this->caption, $table_width, $space, STR_PAD_BOTH) . $new_line : '';
 
-        return $caption . implode($new_line, $lines);
+        return "{$caption}{$content}";
+    }
+
+    /**
+     * @param     $value
+     * @param int $align
+     * @param int $padding
+     * @param int $column
+     * @return array
+     */
+    private function createColumn($value, int $align, int $padding, int $column): array
+    {
+        return [
+            'v' => $value,
+            'a' => $align,
+            'c' => $column,
+            'p' => $padding,
+        ];
     }
 }
